@@ -296,6 +296,12 @@ const CARDS = {
     summaries:["Ich weiss nicht was passiert ist.","Ich weiss nicht wer es war.","Ich weiss nicht wie ich mich fühle.","Ich weiss nicht was wir jetzt machen sollen."]},
 };
 
+// Populate audio map from card sentences
+Object.entries(CARDS).forEach(([key,d])=>{
+  AUDIO_MAP[d.sentence]=key;
+  if(d.summaries) d.summaries.forEach((s,i)=>{ AUDIO_MAP[s]='weiss'+i; });
+});
+
 const STEP_TITLES = ["Was ist passiert?","Wer war das?","Wie fühle ich mich?","Was möchte ich jetzt?"];
 const STEP_COLORS = ["#0a7090","#4530a0","#a05008","#0c5c34"];
 const TOTAL_STEPS = 4;
@@ -304,7 +310,17 @@ const previewing  = [null,null,null,null];
 let speechReady   = false;
 let voiceDE       = null;
 
-/* ── SPEECH ── */
+/* ── AUDIO MAP (ElevenLabs MP3s in audio/ folder) ── */
+// Filled after CARDS definition. Falls back to speech synthesis if file missing.
+const AUDIO_MAP = {
+  'Ich habe ein Problem.': 'start',
+  'Was ist passiert?':     'title0',
+  'Wer war das?':          'title1',
+  'Wie fühle ich mich?':   'title2',
+  'Was möchte ich jetzt?': 'title3',
+};
+
+/* ── SPEECH SYNTHESIS (fallback) ── */
 const PREF_VOICES = ['Anna','Markus','Petra','Yannick','Katja','Helena'];
 function loadVoices() {
   if (!window.speechSynthesis) return;
@@ -321,39 +337,45 @@ if (window.speechSynthesis) {
   speechSynthesis.onvoiceschanged = loadVoices;
   loadVoices();
 }
-function speak(text, ondone) {
+function speakSynth(text, ondone) {
   if (!window.speechSynthesis) { if (ondone) ondone(); return; }
   speechSynthesis.cancel();
   loadVoices();
-  // Small delay after cancel() to avoid Chrome cutting off first syllable
   setTimeout(() => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang='de-DE'; u.rate=0.88; u.pitch=1.0;
     if (voiceDE) u.voice=voiceDE;
-    if (ondone) {
-      u.onend   = ondone;
-      u.onerror = ondone; // ensure callback fires even if speech fails
-    }
+    if (ondone) { u.onend=ondone; u.onerror=ondone; }
     speechSynthesis.speak(u);
   }, 50);
+}
+let currentAudio = null;
+function speak(text, ondone) {
+  if (currentAudio) { currentAudio.pause(); currentAudio.src=''; currentAudio=null; }
+  if (window.speechSynthesis) speechSynthesis.cancel();
+  const key = AUDIO_MAP[text];
+  if (key) {
+    const a = new Audio('audio/' + key + '.mp3');
+    currentAudio = a;
+    a.onended = () => { currentAudio=null; if (ondone) ondone(); };
+    a.onerror = () => { currentAudio=null; speakSynth(text, ondone); };
+    a.play().catch(() => { currentAudio=null; speakSynth(text, ondone); });
+    return;
+  }
+  speakSynth(text, ondone);
 }
 function unlockSpeech(cb) {
   if (speechReady) { cb(); return; }
   const u = new SpeechSynthesisUtterance(' ');
   u.volume=0;
-  u.onend = ()=>{ speechReady=true; cb(); };
+  u.onend  = ()=>{ speechReady=true; cb(); };
   u.onerror= ()=>{ speechReady=true; cb(); };
   if (window.speechSynthesis) { speechSynthesis.cancel(); speechSynthesis.speak(u); }
   else { speechReady=true; cb(); }
 }
-
-// iOS Safari workaround: speech synthesis pauses after ~15s inactivity.
-// Resume it periodically to keep it alive.
+// iOS Safari: keep speech synthesis alive
 if (window.speechSynthesis) {
-  setInterval(() => {
-    if (speechSynthesis.speaking) return; // already active, no need
-    speechSynthesis.resume();
-  }, 10000);
+  setInterval(() => { if (!speechSynthesis.speaking) speechSynthesis.resume(); }, 10000);
 }
 
 /* ── SCREENS ── */
@@ -495,24 +517,16 @@ function buildSummary() {
   });
 }
 function readAll() {
-  if(!window.speechSynthesis) return;
-  speechSynthesis.cancel();
+  if(currentAudio){currentAudio.pause();currentAudio.src='';currentAudio=null;}
+  if(window.speechSynthesis) speechSynthesis.cancel();
   const sentences=chosen.map((k,stepIdx)=>{
     if(!k) return null;
     const d=CARDS[k];
     return (k==='weiss' && d.summaries) ? d.summaries[stepIdx] : d.sentence;
   }).filter(Boolean);
   let idx=0;
-  function nextSentence(){
-    if(idx>=sentences.length) return;
-    const u=new SpeechSynthesisUtterance(sentences[idx++]);
-    u.lang='de-DE'; u.rate=0.88; u.pitch=1.0;
-    if(voiceDE) u.voice=voiceDE;
-    u.onend=nextSentence;
-    u.onerror=nextSentence; // skip to next if one fails
-    speechSynthesis.speak(u);
-  }
-  setTimeout(nextSentence, 50); // small delay after cancel()
+  function next(){ if(idx<sentences.length) speak(sentences[idx++], next); }
+  setTimeout(next, 50);
 }
 document.getElementById('btn-readall').addEventListener('click',readAll);
 document.getElementById('btn-reset').addEventListener('click',function(){
